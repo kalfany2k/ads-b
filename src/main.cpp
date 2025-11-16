@@ -11,6 +11,7 @@
 int const ADS_B_PACKET_SIZE = 112;
 int const BUFFER_SIZE = 16384;
 int const PREAMBLE_LENGTH = 16;
+std::string const PREAMBLE_SAMPLES = "1010001010000000";
 int const DOWNLINK_FORMAT_LENGTH = 5;
 uint32_t const CENTER_FREQUENCY = 1090000000;
 uint32_t const SAMPLE_RATE = 2000000;
@@ -36,22 +37,22 @@ float compute_magnitude_standard_deviation(std::vector<float>& magnitudes, float
     return std::sqrt(deviation_sum / size);
 }
 
-bool is_preamble_present(std::vector<bool>& pulses) {
+bool is_preamble_present(std::vector<bool>& samples) {
     std::string preamble_pulse_position_bits;
     preamble_pulse_position_bits.reserve(PREAMBLE_LENGTH);
 
-    for (bool pulse : pulses) {
+    for (bool pulse : samples) {
         preamble_pulse_position_bits.append(pulse ? "1" : "0");
     }
 
-    return preamble_pulse_position_bits == "1010001010000000";
+    return preamble_pulse_position_bits == PREAMBLE_SAMPLES;
 }
 
-bool set_ads_b_packet_bits(std::vector<bool>& pulses, std::vector<bool>& bits) {
+bool set_ads_b_packet_bits(std::vector<bool>& samples, std::vector<bool>& bits) {
     for (int i = 0; i < ADS_B_PACKET_SIZE * 2; i += 2) {
-        if (pulses[i] == 1 && pulses[i + 1] == 0) {
+        if (samples.at(i) == 1 && samples.at(i + 1) == 0) {
             bits.push_back(1);
-        } else if (pulses[i] == 0 && pulses[i + 1] == 1) {
+        } else if (samples.at(i) == 0 && samples.at(i + 1) == 1) {
             bits.push_back(0);
         } else {
             return false;
@@ -61,10 +62,21 @@ bool set_ads_b_packet_bits(std::vector<bool>& pulses, std::vector<bool>& bits) {
     return true;
 }
 
-void set_pulses_from_magnitudes(std::vector<float>& magnitudes, std::vector<bool>& pulses, float threshold) {
+std::string convert_bits_to_bitstring(std::vector<bool>& bits) {
+    std::string bitstring;
+    bitstring.reserve(bits.size() / 2);
+
+    for (bool bit : bits) {
+        bitstring.append(bit ? "1" : "0");
+    }
+    
+    return bitstring;
+}
+
+void set_samples_from_magnitudes(std::vector<float>& magnitudes, std::vector<bool>& samples, float threshold) {
     for (size_t i = 0; i < magnitudes.size(); i++) {
         if (magnitudes.at(i) > threshold) {
-            pulses.at(i) = 1;
+            samples.at(i) = 1;
         }
     }
 }
@@ -114,33 +126,37 @@ int main()
         // Compute magnitude threshold to ignore frequency noise
         float magnitude_mean = compute_magnitude_mean(magnitudes, magnitudes.size());
         float magnitude_standard_deviation = compute_magnitude_standard_deviation(magnitudes, magnitude_mean, magnitudes.size());
-        float threshold = magnitude_mean + 4 * magnitude_standard_deviation;
+        float threshold = magnitude_mean + 2  * magnitude_standard_deviation;
 
         // int magnitude_over_threshold_count = 0;
 
-        std::vector<bool> pulses;
-        pulses.resize(magnitudes.size(), 0);
-        set_pulses_from_magnitudes(magnitudes, pulses, threshold);
+        std::vector<bool> samples;
+        samples.resize(magnitudes.size(), 0);
+        set_samples_from_magnitudes(magnitudes, samples, threshold);
 
-        for (size_t i = 0; i < pulses.size(); i++) {
-            if (pulses.at(i) == 1 && i < pulses.size() - PREAMBLE_LENGTH) {
-                std::vector<bool> preamble_pulses(pulses.begin() + i, pulses.begin() + i + PREAMBLE_LENGTH);
+        for (size_t i = 0; i < samples.size(); i++) {
+            if (samples.at(i) == 1 && i < samples.size() - PREAMBLE_LENGTH - (ADS_B_PACKET_SIZE * 2)) {
+                std::vector<bool> preamble_samples(samples.begin() + i, samples.begin() + i + PREAMBLE_LENGTH);
                 
-                if (is_preamble_present(preamble_pulses)) {
+                if (is_preamble_present(preamble_samples)) {
                     std::cout << "Preamble found!\n";
 
-                    std::vector<bool> ads_b_packet_pulses(
-                        pulses.begin() + i + PREAMBLE_LENGTH, pulses.begin() + i + PREAMBLE_LENGTH + ADS_B_PACKET_SIZE * 2
+                    std::vector<bool> ads_b_packet_samples(
+                        samples.begin() + i + PREAMBLE_LENGTH, samples.begin() + i + PREAMBLE_LENGTH + ADS_B_PACKET_SIZE * 2
                     );
                     
                     std::vector<bool> ads_b_packet_bits;
-                    ads_b_packet_bits.reserve(ADS_B_PACKET_SIZE / 2);
+                    ads_b_packet_bits.reserve(ADS_B_PACKET_SIZE);
+                    bool were_bits_set = set_ads_b_packet_bits(ads_b_packet_samples, ads_b_packet_bits);
                     
-                    if (set_ads_b_packet_bits(ads_b_packet_pulses, ads_b_packet_bits)) {
-                        for (bool bit : ads_b_packet_pulses) {
-                            std::cout << bit;
-                        }
-                        std::cout << "\n";
+                    std::vector<bool> ads_b_downlink_format_bits(
+                        ads_b_packet_bits.begin(), ads_b_packet_bits.begin() + DOWNLINK_FORMAT_LENGTH
+                    );
+                    
+                    if (ads_b_packet_bits.size() > 5 && convert_bits_to_bitstring(ads_b_downlink_format_bits) == "10001") {
+                        std::cout << "Downlink format found!\n";
+                    } else {
+                        continue;
                     }
                 }
             }
