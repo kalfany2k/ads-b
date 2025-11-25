@@ -15,6 +15,7 @@ std::string const PREAMBLE_SAMPLES = "1010001010000000";
 int const DOWNLINK_FORMAT_LENGTH = 5;
 uint32_t const CENTER_FREQUENCY = 1090000000;
 uint32_t const SAMPLE_RATE = 2000000;
+size_t const message_size = 14; // Length of ADS-B payload in bytes
 
 float compute_magnitude_mean(std::vector<float>& magnitudes, int size) {
     float sum = 0.0f;
@@ -48,18 +49,25 @@ bool is_preamble_present(std::vector<bool>& samples) {
     return preamble_pulse_position_bits == PREAMBLE_SAMPLES;
 }
 
-bool set_ads_b_packet_bits(std::vector<bool>& samples, std::vector<bool>& bits) {
+void set_message_bytes(std::vector<float>& magnitudes, uint8_t message_bytes[], size_t message_size) {
     for (int i = 0; i < ADS_B_PACKET_SIZE * 2; i += 2) {
-        if (samples.at(i) == 1 && samples.at(i + 1) == 0) {
-            bits.push_back(1);
-        } else if (samples.at(i) == 0 && samples.at(i + 1) == 1) {
-            bits.push_back(0);
-        } else {
-            return false;
+        bool bit = magnitudes.at(i) > magnitudes.at(i + 1);
+        size_t bit_number = i / 2;
+        size_t byte_index = bit_number / 8;
+        size_t bit_offset = 7 - (bit_number % 8);
+        if (bit) {
+            message_bytes[byte_index] |= (1 << bit_offset);
+        }    
+    }
+}
+
+void print_bytes(uint8_t bytes[], size_t message_size) {
+    for (int i = 0; i < message_size; i++) {
+        for (int j = 7; j >= 0; j--) {
+            std::cout << ((bytes[i] >> j) & 1);
         }
     }
-
-    return true;
+    std::cout << "\n";
 }
 
 std::string convert_bits_to_bitstring(std::vector<bool>& bits) {
@@ -81,19 +89,16 @@ void set_samples_from_magnitudes(std::vector<float>& magnitudes, std::vector<boo
     }
 }
 
-int main()
-{
+int main() {
     rtlsdr_dev_t *dev = nullptr;
     int device_count = rtlsdr_get_device_count();
 
-    if (device_count == 0)
-    {
+    if (device_count == 0) {
         std::cerr << "No RTL-SDR device was found.\n";
         return 1;
     }
 
-    if (rtlsdr_open(&dev, 0) < 0)
-    {
+    if (rtlsdr_open(&dev, 0) < 0) {
         std::cerr << "Failed to open device.\n";
         return 1;
     }
@@ -110,13 +115,11 @@ int main()
     int n_read;
     rtlsdr_reset_buffer(dev);
 
-    while (true)
-    {
+    while (true) {
         rtlsdr_read_sync(dev, buffer, sizeof(buffer), &n_read);
 
         // Compute all magnitudes from our received samples
-        for (size_t i = 0; i < sizeof(buffer); i += 2)
-        {
+        for (size_t i = 0; i < sizeof(buffer); i += 2) { 
             float I = (float)buffer[i] - 127.5f;
             float Q = (float)buffer[i + 1] - 127.5f;
             float magnitude = std::sqrt(I*I + Q*Q);
@@ -126,9 +129,7 @@ int main()
         // Compute magnitude threshold to ignore frequency noise
         float magnitude_mean = compute_magnitude_mean(magnitudes, magnitudes.size());
         float magnitude_standard_deviation = compute_magnitude_standard_deviation(magnitudes, magnitude_mean, magnitudes.size());
-        float threshold = magnitude_mean + 2  * magnitude_standard_deviation;
-
-        // int magnitude_over_threshold_count = 0;
+        float threshold = magnitude_mean + 2 * magnitude_standard_deviation;
 
         std::vector<bool> samples;
         samples.resize(magnitudes.size(), 0);
@@ -139,33 +140,21 @@ int main()
                 std::vector<bool> preamble_samples(samples.begin() + i, samples.begin() + i + PREAMBLE_LENGTH);
                 
                 if (is_preamble_present(preamble_samples)) {
-                    std::cout << "Preamble found!\n";
+                    std::vector<float> magnitudes_after_preamble(
+                        magnitudes.begin() + i + PREAMBLE_LENGTH, 
+                        magnitudes.begin() + i + PREAMBLE_LENGTH + 224
+                    );
 
-                    std::vector<bool> ads_b_packet_samples(
-                        samples.begin() + i + PREAMBLE_LENGTH, samples.begin() + i + PREAMBLE_LENGTH + ADS_B_PACKET_SIZE * 2
-                    );
+                    uint8_t message_bytes[message_size] = {0};
+                    set_message_bytes(magnitudes_after_preamble, message_bytes, message_size);
                     
-                    std::vector<bool> ads_b_packet_bits;
-                    ads_b_packet_bits.reserve(ADS_B_PACKET_SIZE);
-                    bool were_bits_set = set_ads_b_packet_bits(ads_b_packet_samples, ads_b_packet_bits);
-                    
-                    std::vector<bool> ads_b_downlink_format_bits(
-                        ads_b_packet_bits.begin(), ads_b_packet_bits.begin() + DOWNLINK_FORMAT_LENGTH
-                    );
-                    
-                    if (ads_b_packet_bits.size() > 5 && convert_bits_to_bitstring(ads_b_downlink_format_bits) == "10001") {
-                        std::cout << "Downlink format found!\n";
-                    } else {
-                        continue;
+                    if (message_bytes[0] & 0b00011111 == 17) {
+                        print_bytes(message_bytes, message_size);
                     }
+                    
                 }
             }
         }
-        
-        // if (magnitude_over_threshold_count >= 112) {
-        //     std::cout << "Mean: " << magnitude_mean << " | Standard Deviation: " << magnitude_standard_deviation << " | Threshold: " <<     threshold << "\n" << "Samples: " << magnitudes.size() << " | Above Threshold: " << magnitude_over_threshold_count << " | Below " << magnitudes.size() - magnitude_over_threshold_count << "\n";
-        // } 
-
         magnitudes.clear();
     }
 
