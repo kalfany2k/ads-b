@@ -16,6 +16,7 @@ int const DOWNLINK_FORMAT_LENGTH = 5;
 uint32_t const CENTER_FREQUENCY = 1090000000;
 uint32_t const SAMPLE_RATE = 2000000;
 size_t const message_size = 14; // Length of ADS-B payload in bytes
+uint32_t const CRC_GENERATOR = 0xFFF409;
 
 float compute_magnitude_mean(std::vector<float>& magnitudes, int size) {
     float sum = 0.0f;
@@ -61,24 +62,40 @@ void set_message_bytes(std::vector<float>& magnitudes, uint8_t message_bytes[], 
     }
 }
 
-void print_bytes(uint8_t bytes[], size_t message_size) {
-    for (int i = 0; i < message_size; i++) {
-        for (int j = 7; j >= 0; j--) {
-            std::cout << ((bytes[i] >> j) & 1);
-        }
+char to_hex_char(uint8_t value) {
+    if (value < 10) {
+        return '0' + value;
+    } else {
+        return 'A' + (value - 10);
     }
-    std::cout << "\n";
 }
 
-std::string convert_bits_to_bitstring(std::vector<bool>& bits) {
-    std::string bitstring;
-    bitstring.reserve(bits.size() / 2);
+void print_byte(uint8_t byte) {
+    std::cout << to_hex_char((byte >> 4) & 0xF) << to_hex_char(byte & 0xF);
+}
 
-    for (bool bit : bits) {
-        bitstring.append(bit ? "1" : "0");
+void print_bytes(uint8_t bytes[], size_t message_size) {
+    for (size_t i = 0; i < message_size; i++) {
+        print_byte(bytes[i]);
+    }
+}
+
+bool is_crc_valid(uint8_t message_bytes[], size_t message_bytes_count) {
+    uint32_t buffer = 0;
+
+    for (size_t i = 0; i < message_bytes_count; i++) {
+        for (size_t j = 0; j < 8; j++) {
+            bool bit = (message_bytes[i] >> (7 - j)) & 0x1;
+            bool msb = buffer & 0x800000;
+            buffer = ((buffer << 1) | bit) & 0xFFFFFF;
+            if (msb) {
+                buffer ^= CRC_GENERATOR;
+            }
+        }
     }
     
-    return bitstring;
+    std::cout << buffer << "\n";
+    return buffer == 0;
 }
 
 void set_samples_from_magnitudes(std::vector<float>& magnitudes, std::vector<bool>& samples, float threshold) {
@@ -148,10 +165,12 @@ int main() {
                     uint8_t message_bytes[message_size] = {0};
                     set_message_bytes(magnitudes_after_preamble, message_bytes, message_size);
                     
-                    if (message_bytes[0] & 0b00011111 == 17) {
+                    if (((message_bytes[0] >> 3) & 0b11111) == 17) {
                         print_bytes(message_bytes, message_size);
+                        std::cout << "\n";
+                        bool crc_valid = is_crc_valid(message_bytes, message_size);
+                        std::cout << "CRC validity ~ " << crc_valid << "\n";
                     }
-                    
                 }
             }
         }
