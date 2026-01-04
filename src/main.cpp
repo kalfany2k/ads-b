@@ -3,22 +3,32 @@
 #include <math.h>
 #include <vector>
 #include <chrono>
-#include <ctime>
-#include <iomanip>
 #include <string>
 #include <cassert>
 
-int const ADS_B_PACKET_SIZE = 112;
-int const BUFFER_SIZE = 16384;
-int const PREAMBLE_LENGTH = 16;
-std::string const PREAMBLE_SAMPLES = "1010001010000000";
-int const DOWNLINK_FORMAT_LENGTH = 5;
-uint32_t const CENTER_FREQUENCY = 1090000000;
-uint32_t const SAMPLE_RATE = 2000000;
-size_t const message_size = 14; // Length of ADS-B payload in bytes
-uint32_t const CRC_GENERATOR = 0xFFF409;
+const int ADS_B_PACKET_SIZE = 112;
+const int ADS_B_SAMPLE_SIZE = 224;
+const int BUFFER_SIZE = 16384;
+const int PREAMBLE_LENGTH = 16;
+const int DOWNLINK_FORMAT_LENGTH = 5;
+const uint32_t CENTER_FREQUENCY = 1090000000;
+const uint32_t SAMPLE_RATE = 2000000;
+const size_t MESSAGE_SIZE = 14; // Length of ADS-B payload in bytes
+const uint32_t CRC_GENERATOR = 0xFFF409;
 
-float compute_magnitude_mean(std::vector<float>& magnitudes, int size) {
+struct ADSBPacket {
+    int downlink_format;
+    int capability;
+    std::string icao_address;
+    int type;
+    int altitude;
+    bool time_flag;
+    bool format_flag;
+    float latitude;
+    float longitude;
+};
+
+float compute_magnitude_mean(std::vector<float>& magnitudes, size_t size) {
     float sum = 0.0f;
 
     for (float magnitude : magnitudes) {
@@ -28,7 +38,7 @@ float compute_magnitude_mean(std::vector<float>& magnitudes, int size) {
     return sum / size;
 }
 
-float compute_magnitude_standard_deviation(std::vector<float>& magnitudes, float mean, int size) {
+float compute_magnitude_standard_deviation(std::vector<float>& magnitudes, float mean, size_t size) {
     float deviation_sum = 0.0f;
 
     for (float magnitude : magnitudes) {
@@ -36,29 +46,18 @@ float compute_magnitude_standard_deviation(std::vector<float>& magnitudes, float
         deviation_sum += diff * diff;
     }
 
-    return std::sqrt(deviation_sum / size);
+    return std::sqrt(deviation_sum / static_cast<float>(size));
 }
 
-bool is_preamble_present(std::vector<bool>& samples) {
-    std::string preamble_pulse_position_bits;
-    preamble_pulse_position_bits.reserve(PREAMBLE_LENGTH);
-
-    for (bool pulse : samples) {
-        preamble_pulse_position_bits.append(pulse ? "1" : "0");
-    }
-
-    return preamble_pulse_position_bits == PREAMBLE_SAMPLES;
-}
-
-void set_message_bytes(std::vector<float>& magnitudes, uint8_t message_bytes[], size_t message_size) {
-    for (int i = 0; i < ADS_B_PACKET_SIZE * 2; i += 2) {
-        bool bit = magnitudes.at(i) > magnitudes.at(i + 1);
+void set_message_bytes(const std::vector<float>& magnitudes, size_t starting_index, uint8_t message_bytes[]) {
+    for (int i = 0; i < ADS_B_SAMPLE_SIZE; i += 2) {
+        bool bit = magnitudes.at(starting_index + i) > magnitudes.at(starting_index + i + 1);
         size_t bit_number = i / 2;
         size_t byte_index = bit_number / 8;
         size_t bit_offset = 7 - (bit_number % 8);
         if (bit) {
             message_bytes[byte_index] |= (1 << bit_offset);
-        }    
+        }
     }
 }
 
@@ -70,17 +69,17 @@ char to_hex_char(uint8_t value) {
     }
 }
 
-void print_byte(uint8_t byte) {
+void print_byte(const uint8_t byte) {
     std::cout << to_hex_char((byte >> 4) & 0xF) << to_hex_char(byte & 0xF);
 }
 
-void print_bytes(uint8_t bytes[], size_t message_size) {
-    for (size_t i = 0; i < message_size; i++) {
+void print_bytes(uint8_t bytes[]) {
+    for (size_t i = 0; i < MESSAGE_SIZE; i++) {
         print_byte(bytes[i]);
     }
 }
 
-bool is_crc_valid(uint8_t message_bytes[], size_t message_bytes_count) {
+bool is_crc_valid(const uint8_t message_bytes[], const size_t message_bytes_count) {
     uint32_t buffer = 0;
 
     for (size_t i = 0; i < message_bytes_count; i++) {
@@ -93,24 +92,53 @@ bool is_crc_valid(uint8_t message_bytes[], size_t message_bytes_count) {
             }
         }
     }
-    
-    std::cout << buffer << "\n";
+
     return buffer == 0;
 }
 
-void set_samples_from_magnitudes(std::vector<float>& magnitudes, std::vector<bool>& samples, float threshold) {
-    for (size_t i = 0; i < magnitudes.size(); i++) {
-        if (magnitudes.at(i) > threshold) {
-            samples.at(i) = 1;
-        }
+void extract_data(ADSBPacket& packet, const uint8_t message_bytes[]) {
+    packet.downlink_format = (message_bytes[0] >> 3) & 0b11111;
+    packet.capability = message_bytes[0] & 0b111;
+
+    std::string icao_address;
+    for (int i = 2; i < 5; i++) {
+        icao_address.push_back(to_hex_char((message_bytes[i] >> 4) & 0xF));
+        icao_address.push_back(to_hex_char(message_bytes[i] & 0xF));
     }
+
+    packet.icao_address = icao_address;
+
+    packet.type = message_bytes[5];
+
+    bool special_bit = message_bytes[6] & 0b1;
+    uint32_t altitude = 0 << ((message_bytes[6] >> 1) & 0b1111111) << ((message_bytes[7] >> 4) & 0b1111);
+    packet.altitude = static_cast<int>(altitude) * (special_bit ? 25 : 100);
+
+    packet.time_flag = (message_bytes[7] >> 3) & 0b1;
+    packet.format_flag = (message_bytes[7] >> 2) & 0b1;
+
+    uint32_t latitude = 0 << (message_bytes[7] & 0b11) << message_bytes[8] << ((message_bytes[9] >> 1) & 0b1111111);
+    uint32_t longitude = 0 << (message_bytes[9] & 0b1) << message_bytes[10] << message_bytes[11];
+
+    // TODO: Implement Compact Position Reporting
+    packet.latitude = static_cast<float>(latitude) / 131072.0f;
+    packet.longitude = static_cast<float>(longitude) / 131072.0f;
+}
+
+int is_preamble_present(const std::vector<float>& magnitudes, const size_t start_index, const float threshold) {
+    return (magnitudes[start_index] > threshold) &&
+        (magnitudes[start_index + 2] > threshold) &&
+        (magnitudes[start_index + 7] > threshold) &&
+        (magnitudes[start_index + 9] > threshold) &&
+        (magnitudes[start_index + 1] < threshold * 0.5f) &&
+        (magnitudes[start_index + 3] < threshold * 0.5f) &&
+        (magnitudes[start_index + 8] < threshold * 0.5f);
 }
 
 int main() {
     rtlsdr_dev_t *dev = nullptr;
-    int device_count = rtlsdr_get_device_count();
 
-    if (device_count == 0) {
+    if (rtlsdr_get_device_count() == 0) {
         std::cerr << "No RTL-SDR device was found.\n";
         return 1;
     }
@@ -125,55 +153,46 @@ int main() {
     rtlsdr_set_tuner_gain_mode(dev, 0);
 
     uint8_t buffer[BUFFER_SIZE];
-    
-    std::vector<float> magnitudes; 
+
+    std::vector<float> magnitudes;
     magnitudes.reserve(BUFFER_SIZE / 2);
+
+    std::vector<ADSBPacket> valid_packets;
 
     int n_read;
     rtlsdr_reset_buffer(dev);
 
-    while (true) {
+    while (valid_packets.size() < 100) {
         rtlsdr_read_sync(dev, buffer, sizeof(buffer), &n_read);
 
         // Compute all magnitudes from our received samples
-        for (size_t i = 0; i < sizeof(buffer); i += 2) { 
-            float I = (float)buffer[i] - 127.5f;
-            float Q = (float)buffer[i + 1] - 127.5f;
-            float magnitude = std::sqrt(I*I + Q*Q);
-            magnitudes.push_back(magnitude);
+        for (size_t i = 0; i < sizeof(buffer); i += 2) {
+            float I = static_cast<float>(buffer[i]) - 128.0f;
+            float Q = static_cast<float>(buffer[i + 1]) - 128.0f;
+            magnitudes.push_back(I*I + Q*Q);
         }
-        
+
         // Compute magnitude threshold to ignore frequency noise
         float magnitude_mean = compute_magnitude_mean(magnitudes, magnitudes.size());
         float magnitude_standard_deviation = compute_magnitude_standard_deviation(magnitudes, magnitude_mean, magnitudes.size());
         float threshold = magnitude_mean + 2 * magnitude_standard_deviation;
 
-        std::vector<bool> samples;
-        samples.resize(magnitudes.size(), 0);
-        set_samples_from_magnitudes(magnitudes, samples, threshold);
+        for (size_t i = 0; i <= magnitudes.size() - ADS_B_SAMPLE_SIZE - PREAMBLE_LENGTH; i++) {
+            if (magnitudes.at(i) > threshold && is_preamble_present(magnitudes, i, threshold)) {
+                size_t message_start_index = i + PREAMBLE_LENGTH;
+                uint8_t message_bytes[MESSAGE_SIZE] = {0};
+                set_message_bytes(magnitudes, message_start_index, message_bytes);
 
-        for (size_t i = 0; i < samples.size(); i++) {
-            if (samples.at(i) == 1 && i < samples.size() - PREAMBLE_LENGTH - (ADS_B_PACKET_SIZE * 2)) {
-                std::vector<bool> preamble_samples(samples.begin() + i, samples.begin() + i + PREAMBLE_LENGTH);
-                
-                if (is_preamble_present(preamble_samples)) {
-                    std::vector<float> magnitudes_after_preamble(
-                        magnitudes.begin() + i + PREAMBLE_LENGTH, 
-                        magnitudes.begin() + i + PREAMBLE_LENGTH + 224
-                    );
-
-                    uint8_t message_bytes[message_size] = {0};
-                    set_message_bytes(magnitudes_after_preamble, message_bytes, message_size);
-                    
-                    if (((message_bytes[0] >> 3) & 0b11111) == 17) {
-                        print_bytes(message_bytes, message_size);
-                        std::cout << "\n";
-                        bool crc_valid = is_crc_valid(message_bytes, message_size);
-                        std::cout << "CRC validity ~ " << crc_valid << "\n";
+                if (((message_bytes[0] >> 3) & 0b11111) == 17) {
+                    if (is_crc_valid(message_bytes, MESSAGE_SIZE - 3)) {
+                        ADSBPacket packet = {};
+                        extract_data(packet, message_bytes);
+                        valid_packets.push_back(packet);
                     }
                 }
             }
         }
+
         magnitudes.clear();
     }
 
