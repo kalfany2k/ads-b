@@ -13,7 +13,11 @@ pkg_check_modules(RTLSDR REQUIRED librtlsdr)
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
 # Create executable
-add_executable(ads-b ${SOURCES})
+add_executable(ads-b ${SOURCES}
+        src/byte_manipulation.cpp
+        src/byte_manipulation.h
+        src/ads_b_helpers.cpp
+        src/ads_b_helpers.h)
 
 # Link rtl-sdr library
 target_link_libraries(ads-b ${RTLSDR_LIBRARIES})
