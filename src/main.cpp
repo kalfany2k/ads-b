@@ -1,20 +1,20 @@
 #include <rtl-sdr.h>
 #include <iostream>
-#include <math.h>
 #include <vector>
 #include <chrono>
 #include <string>
 #include <cassert>
+#include "byte_manipulation.h"
+#include "ads_b_helpers.h"
 
-const int ADS_B_PACKET_SIZE = 112;
-const int ADS_B_SAMPLE_SIZE = 224;
+const size_t ADS_B_PACKET_SIZE = 112;
+const size_t ADS_B_SAMPLE_SIZE = 224;
 const int BUFFER_SIZE = 16384;
 const int PREAMBLE_LENGTH = 16;
 const int DOWNLINK_FORMAT_LENGTH = 5;
 const uint32_t CENTER_FREQUENCY = 1090000000;
 const uint32_t SAMPLE_RATE = 2000000;
 const size_t MESSAGE_SIZE = 14; // Length of ADS-B payload in bytes
-const uint32_t CRC_GENERATOR = 0xFFF409;
 
 struct ADSBPacket {
     int downlink_format;
@@ -49,51 +49,10 @@ float compute_magnitude_standard_deviation(std::vector<float>& magnitudes, float
     return std::sqrt(deviation_sum / static_cast<float>(size));
 }
 
-void set_message_bytes(const std::vector<float>& magnitudes, size_t starting_index, uint8_t message_bytes[]) {
-    for (int i = 0; i < ADS_B_SAMPLE_SIZE; i += 2) {
-        bool bit = magnitudes.at(starting_index + i) > magnitudes.at(starting_index + i + 1);
-        size_t bit_number = i / 2;
-        size_t byte_index = bit_number / 8;
-        size_t bit_offset = 7 - (bit_number % 8);
-        if (bit) {
-            message_bytes[byte_index] |= (1 << bit_offset);
-        }
-    }
-}
-
-char to_hex_char(uint8_t value) {
-    if (value < 10) {
-        return '0' + value;
-    } else {
-        return 'A' + (value - 10);
-    }
-}
-
-void print_byte(const uint8_t byte) {
-    std::cout << to_hex_char((byte >> 4) & 0xF) << to_hex_char(byte & 0xF);
-}
-
 void print_bytes(uint8_t bytes[]) {
     for (size_t i = 0; i < MESSAGE_SIZE; i++) {
         print_byte(bytes[i]);
     }
-}
-
-bool is_crc_valid(const uint8_t message_bytes[], const size_t message_bytes_count) {
-    uint32_t buffer = 0;
-
-    for (size_t i = 0; i < message_bytes_count; i++) {
-        for (size_t j = 0; j < 8; j++) {
-            bool bit = (message_bytes[i] >> (7 - j)) & 0x1;
-            bool msb = buffer & 0x800000;
-            buffer = ((buffer << 1) | bit) & 0xFFFFFF;
-            if (msb) {
-                buffer ^= CRC_GENERATOR;
-            }
-        }
-    }
-
-    return buffer == 0;
 }
 
 void extract_data(ADSBPacket& packet, const uint8_t message_bytes[]) {
@@ -181,7 +140,7 @@ int main() {
             if (magnitudes.at(i) > threshold && is_preamble_present(magnitudes, i, threshold)) {
                 size_t message_start_index = i + PREAMBLE_LENGTH;
                 uint8_t message_bytes[MESSAGE_SIZE] = {0};
-                set_message_bytes(magnitudes, message_start_index, message_bytes);
+                set_message_bytes(magnitudes, message_start_index, message_bytes, ADS_B_SAMPLE_SIZE);
 
                 if (((message_bytes[0] >> 3) & 0b11111) == 17) {
                     if (is_crc_valid(message_bytes, MESSAGE_SIZE - 3)) {
