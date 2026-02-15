@@ -3,6 +3,8 @@
 #include <vector>
 #include <chrono>
 #include <string>
+#include <ostream>
+#include <cmath>
 #include <cassert>
 #include "byte_manipulation.h"
 #include "ads_b_helpers.h"
@@ -17,16 +19,45 @@ const uint32_t SAMPLE_RATE = 2000000;
 const size_t MESSAGE_SIZE = 14; // Length of ADS-B payload in bytes
 
 struct ADSBPacket {
-    int downlink_format;
-    int capability;
-    std::string icao_address;
-    int type;
-    int altitude;
-    bool time_flag;
-    bool format_flag;
-    float latitude;
-    float longitude;
+    float latitude = 0.0f;
+    float longitude = 0.0f;
+    uint32_t icao_address = 0;
+    uint16_t altitude = 0;
+    uint8_t downlink_format = 0;
+    uint8_t capability = 0;
+    uint8_t type = 0;
+    bool time_flag = false;
+    bool format_flag = false;
+
+    ADSBPacket() = default;
+    
+    ADSBPacket(const uint8_t message_bytes[]) {
+        downlink_format = extract_bits(message_bytes, 0, 5);
+        capability = extract_bits(message_bytes, 5, 8);
+        icao_address = extract_bits(message_bytes, 8, 32);
+        type = extract_bits(message_bytes, 32, 37);
+        altitude = extract_bits(message_bytes, 40, 52);
+        time_flag = extract_bits(message_bytes, 52, 53);
+        format_flag = extract_bits(message_bytes, 53, 54);
+        latitude = static_cast<float>(extract_bits(message_bytes, 54, 71)) / 131072.0f;
+        longitude = static_cast<float>(extract_bits(message_bytes, 71, 88)) / 131072.0f;
+    }
 };
+
+std::ostream& operator<<(std::ostream& os, const ADSBPacket& packet) {
+    os << "ADSBPacket {\n"
+       << "  downlink_format: " << static_cast<int>(packet.downlink_format) << "\n"
+       << "  capability: " << static_cast<int>(packet.capability) << "\n"
+       << "  icao_address: " << uint32_t_to_string(packet.icao_address) << "\n"
+       << "  type: " << static_cast<int>(packet.type >> 3) << "\n"
+       << "  altitude: " << packet.altitude << "\n"
+       << "  time_flag: " << packet.time_flag << "\n"
+       << "  format_flag: " << packet.format_flag << "\n"
+       << "  latitude: " << packet.latitude << "\n"
+       << "  longitude: " << packet.longitude << "\n"
+       << "}";
+    return os;
+}
 
 float compute_magnitude_mean(std::vector<float>& magnitudes, size_t size) {
     float sum = 0.0f;
@@ -47,41 +78,6 @@ float compute_magnitude_standard_deviation(std::vector<float>& magnitudes, float
     }
 
     return std::sqrt(deviation_sum / static_cast<float>(size));
-}
-
-void print_bytes(uint8_t bytes[]) {
-    for (size_t i = 0; i < MESSAGE_SIZE; i++) {
-        print_byte(bytes[i]);
-    }
-}
-
-void extract_data(ADSBPacket& packet, const uint8_t message_bytes[]) {
-    packet.downlink_format = (message_bytes[0] >> 3) & 0b11111;
-    packet.capability = message_bytes[0] & 0b111;
-
-    std::string icao_address;
-    for (int i = 2; i < 5; i++) {
-        icao_address.push_back(to_hex_char((message_bytes[i] >> 4) & 0xF));
-        icao_address.push_back(to_hex_char(message_bytes[i] & 0xF));
-    }
-
-    packet.icao_address = icao_address;
-
-    packet.type = message_bytes[5];
-
-    bool special_bit = message_bytes[6] & 0b1;
-    uint32_t altitude = 0 << ((message_bytes[6] >> 1) & 0b1111111) << ((message_bytes[7] >> 4) & 0b1111);
-    packet.altitude = static_cast<int>(altitude) * (special_bit ? 25 : 100);
-
-    packet.time_flag = (message_bytes[7] >> 3) & 0b1;
-    packet.format_flag = (message_bytes[7] >> 2) & 0b1;
-
-    uint32_t latitude = 0 << (message_bytes[7] & 0b11) << message_bytes[8] << ((message_bytes[9] >> 1) & 0b1111111);
-    uint32_t longitude = 0 << (message_bytes[9] & 0b1) << message_bytes[10] << message_bytes[11];
-
-    // TODO: Implement Compact Position Reporting
-    packet.latitude = static_cast<float>(latitude) / 131072.0f;
-    packet.longitude = static_cast<float>(longitude) / 131072.0f;
 }
 
 int is_preamble_present(const std::vector<float>& magnitudes, const size_t start_index, const float threshold) {
@@ -143,10 +139,9 @@ int main() {
                 set_message_bytes(magnitudes, message_start_index, message_bytes, ADS_B_SAMPLE_SIZE);
 
                 if (((message_bytes[0] >> 3) & 0b11111) == 17) {
-                    if (is_crc_valid(message_bytes, MESSAGE_SIZE - 3)) {
-                        ADSBPacket packet = {};
-                        extract_data(packet, message_bytes);
-                        valid_packets.push_back(packet);
+                    if (is_crc_valid(message_bytes, MESSAGE_SIZE)) {
+                        ADSBPacket packet(message_bytes);
+                        std::cout << packet << "\n";
                     }
                 }
             }
